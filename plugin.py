@@ -450,7 +450,15 @@ class PiHolePlugin:
             # PUT to /lists/{encoded_address}?type={type}
             url = f"{base_url}/api/lists/{encoded_address}?type={list_type}"
             
-            update_data = {"enabled": enabled}
+            # Send ALL fields from current list to preserve comment, groups, etc.
+            update_data = {
+                "enabled": enabled,
+                "comment": target_list.get('comment', ''),
+                "groups": target_list.get('groups', []),
+                "address": list_address,
+                "type": list_type
+            }
+            
             data = json.dumps(update_data).encode('utf-8')
             
             req = urllib.request.Request(url, data=data, method='PUT',
