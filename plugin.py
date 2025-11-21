@@ -1,15 +1,16 @@
 """
-<plugin key="PiHole" name="Pi-hole Monitor and Control" author="Wojtek Sawasciuk" version="0.0.2" wikilink="https://github.com/voyo/Domoticz_PiHole-Control" externallink="https://pi-hole.net/">
+<plugin key="PiHole" name="Pi-hole Monitor and Control" author="Wojtek Sawasciuk" version="0.0.3" wikilink="https://github.com/voyo/Domoticz_PiHole-Control" externallink="https://pi-hole.net/">
     <description>
         <h2>Pi-hole Monitor and Control Plugin</h2><br/>
-        Monitor Pi-hole statistics and control block lists for parental control scheduling.<br/>
-        Based on abandoned plugin by Xorfor - https://forum.domoticz.com/viewtopic.php?t=20834
+        Monitor Pi-hole statistics and control block lists and groups for parental control scheduling.<br/>
+        Based on abandoned plugin by Xorfor. Forum thread - https://forum.domoticz.com/viewtopic.php?t=44132
         <h3>Features</h3>
         <ul style="list-style-type:square">
             <li>Real-time Pi-hole statistics monitoring</li>
             <li>Dynamic list detection - automatically adds/removes list devices</li>
+            <li>Dynamic group detection - automatically adds/removes group devices</li>
             <li>Individual block list enable/disable control</li>
-            <li>Support for group-based lists (e.g., Kids group)</li>
+            <li>Individual group enable/disable control</li>
             <li>Scheduler integration for parental controls</li>
         </ul>
         <h3>Configuration</h3>
@@ -50,11 +51,13 @@ class PiHolePlugin:
     UNIT_UNIQUE_CLIENTS = 8
     UNIT_UNIQUE_DOMAINS = 9
     UNIT_STATUS = 10
-    UNIT_LISTS_START = 100  # Lists start from unit 100
+    UNIT_LISTS_START = 100   # Lists start from unit 100
+    UNIT_GROUPS_START = 200  # Groups start from unit 200
     
     def __init__(self):
         self.sid = None
-        self.lists_map = {}  # Maps list_id -> unit
+        self.lists_map = {}   # Maps list_id -> unit
+        self.groups_map = {}  # Maps group_id -> unit
         self.heartbeat_counter = 0
         return
 
@@ -71,12 +74,14 @@ class PiHolePlugin:
         # Create statistics devices if they don't exist
         self.createStatisticsDevices()
         
-        # Load existing list mappings from Domoticz devices
+        # Load existing mappings from Domoticz devices
         self.loadExistingListMappings()
+        self.loadExistingGroupMappings()
         
-        # Authenticate and sync list devices
+        # Authenticate and sync devices
         if self.authenticate():
             self.syncListDevices()
+            self.syncGroupDevices()
             self.updateDevices()
         else:
             Domoticz.Error("Failed to authenticate with Pi-hole")
@@ -94,7 +99,7 @@ class PiHolePlugin:
         Domoticz.Debug(f"onCommand called for Unit {Unit}: Command '{Command}', Level: {Level}")
         
         # Handle list enable/disable commands
-        if Unit >= self.UNIT_LISTS_START:
+        if Unit >= self.UNIT_LISTS_START and Unit < self.UNIT_GROUPS_START:
             list_id = self.getListIdFromUnit(Unit)
             if list_id:
                 new_state = (Command.upper() == "ON")
@@ -109,6 +114,23 @@ class PiHolePlugin:
                     self.updateDevices()
                 else:
                     Domoticz.Error(f"Failed to change state of list ID {list_id}")
+        
+        # Handle group enable/disable commands
+        elif Unit >= self.UNIT_GROUPS_START:
+            group_id = self.getGroupIdFromUnit(Unit)
+            if group_id is not None:
+                new_state = (Command.upper() == "ON")
+                if self.setGroupState(group_id, new_state):
+                    # Update device state
+                    nValue = 1 if new_state else 0
+                    sValue = "On" if new_state else "Off"
+                    Devices[Unit].Update(nValue=nValue, sValue=sValue)
+                    Domoticz.Log(f"Group ID {group_id} ('{Devices[Unit].Name}') set to {'enabled' if new_state else 'disabled'}")
+                    
+                    # Force immediate refresh after state change
+                    self.updateDevices()
+                else:
+                    Domoticz.Error(f"Failed to change state of group ID {group_id}")
 
     def onNotification(self, Name, Subject, Text, Status, Priority, Sound, ImageFile):
         Domoticz.Debug("onNotification called")
@@ -127,8 +149,9 @@ class PiHolePlugin:
                 Domoticz.Error("Re-authentication failed")
                 return
         
-        # Sync list devices (check for added/removed lists)
+        # Sync devices (check for added/removed lists and groups)
         self.syncListDevices()
+        self.syncGroupDevices()
         
         # Update all devices
         self.updateDevices()
@@ -180,11 +203,22 @@ class PiHolePlugin:
     def loadExistingListMappings(self):
         """Load existing list ID to unit mappings from device descriptions"""
         for unit, device in Devices.items():
-            if unit >= self.UNIT_LISTS_START and device.Description.startswith("ListID:"):
+            if unit >= self.UNIT_LISTS_START and unit < self.UNIT_GROUPS_START and device.Description.startswith("ListID:"):
                 try:
                     list_id = int(device.Description.split(":")[1])
                     self.lists_map[list_id] = unit
                     Domoticz.Debug(f"Loaded mapping: List ID {list_id} -> Unit {unit}")
+                except:
+                    pass
+
+    def loadExistingGroupMappings(self):
+        """Load existing group ID to unit mappings from device descriptions"""
+        for unit, device in Devices.items():
+            if unit >= self.UNIT_GROUPS_START and device.Description.startswith("GroupID:"):
+                try:
+                    group_id = int(device.Description.split(":")[1])
+                    self.groups_map[group_id] = unit
+                    Domoticz.Debug(f"Loaded mapping: Group ID {group_id} -> Unit {unit}")
                 except:
                     pass
 
@@ -251,6 +285,69 @@ class PiHolePlugin:
         
         Domoticz.Debug("=== Finished list synchronization ===")
 
+    def syncGroupDevices(self):
+        """Synchronize group devices with Pi-hole - add new, remove deleted, update names"""
+        
+        Domoticz.Debug("=== Starting group synchronization ===")
+        
+        groups_data = self.apiGet("/groups")
+        if not groups_data or 'groups' not in groups_data:
+            Domoticz.Error("Failed to get groups from Pi-hole")
+            return
+        
+        # Log what we received
+        Domoticz.Debug(f"Received {len(groups_data['groups'])} groups from Pi-hole API")
+        for grp in groups_data['groups']:
+            Domoticz.Debug(f"  Pi-hole group: ID={grp.get('id')}, name={grp.get('name')}, enabled={grp.get('enabled')}")
+        
+        current_groups = {grp.get('id'): grp for grp in groups_data['groups']}
+        current_group_ids = set(current_groups.keys())
+        existing_group_ids = set(self.groups_map.keys())
+        
+        Domoticz.Debug(f"Current Pi-hole group IDs: {sorted(current_group_ids)}")
+        Domoticz.Debug(f"Existing Domoticz group IDs: {sorted(existing_group_ids)}")
+        
+        # Find new groups
+        new_group_ids = current_group_ids - existing_group_ids
+        
+        # Find removed groups
+        removed_group_ids = existing_group_ids - current_group_ids
+        
+        if new_group_ids:
+            Domoticz.Log(f"Found {len(new_group_ids)} new group(s) to add: {new_group_ids}")
+        if removed_group_ids:
+            Domoticz.Log(f"Found {len(removed_group_ids)} deleted group(s) to remove: {removed_group_ids}")
+        
+        # Remove deleted groups from Domoticz
+        for group_id in removed_group_ids:
+            unit = self.groups_map.get(group_id)
+            if unit and unit in Devices:
+                device_name = Devices[unit].Name
+                Domoticz.Log(f"Removing device for deleted group ID {group_id}: {device_name} (Unit {unit})")
+                Devices[unit].Delete()
+            if group_id in self.groups_map:
+                del self.groups_map[group_id]
+        
+        # Add new groups to Domoticz
+        for group_id in new_group_ids:
+            grp = current_groups[group_id]
+            self.createGroupDevice(group_id, grp)
+        
+        # Update existing group names and states
+        for group_id in (existing_group_ids & current_group_ids):
+            grp = current_groups[group_id]
+            unit = self.groups_map.get(group_id)
+            
+            if unit and unit in Devices:
+                new_name = f"Group: {grp.get('name', 'Unnamed Group')}"
+                if Devices[unit].Name != new_name:
+                    old_name = Devices[unit].Name
+                    Devices[unit].Update(Name=new_name, nValue=Devices[unit].nValue, 
+                                       sValue=Devices[unit].sValue)
+                    Domoticz.Log(f"Updated group name from '{old_name}' to '{new_name}'")
+        
+        Domoticz.Debug("=== Finished group synchronization ===")
+
     def generateListDeviceName(self, lst):
         """Generate device name for a list"""
         comment = lst.get('comment', 'Unnamed List')
@@ -270,10 +367,13 @@ class PiHolePlugin:
         device_name = self.generateListDeviceName(lst)
         enabled = lst.get('enabled', False)
         
-        # Find next available unit
+        # Find next available unit in lists range
         unit = self.UNIT_LISTS_START
         while unit in Devices or unit in self.lists_map.values():
             unit += 1
+            if unit >= self.UNIT_GROUPS_START:
+                Domoticz.Error("No available units for lists")
+                return
         
         # Store list_id in device description for persistence
         description = f"ListID:{list_id}"
@@ -292,11 +392,46 @@ class PiHolePlugin:
         
         Domoticz.Log(f"Created device for list ID {list_id}: {device_name} (Unit {unit})")
 
+    def createGroupDevice(self, group_id, grp):
+        """Create a new device for a group"""
+        
+        device_name = f"Group: {grp.get('name', 'Unnamed Group')}"
+        enabled = grp.get('enabled', True)
+        
+        # Find next available unit in groups range
+        unit = self.UNIT_GROUPS_START
+        while unit in Devices or unit in self.groups_map.values():
+            unit += 1
+        
+        # Store group_id in device description for persistence
+        description = f"GroupID:{group_id}"
+        
+        Domoticz.Device(Name=device_name, Unit=unit, 
+                      TypeName="Switch", Switchtype=0, 
+                      Description=description, Used=1).Create()
+        
+        # Update mapping
+        self.groups_map[group_id] = unit
+        
+        # Set initial state
+        nValue = 1 if enabled else 0
+        sValue = "On" if enabled else "Off"
+        Devices[unit].Update(nValue=nValue, sValue=sValue)
+        
+        Domoticz.Log(f"Created device for group ID {group_id}: {device_name} (Unit {unit})")
+
     def getListIdFromUnit(self, unit):
         """Get list ID from unit number"""
         for list_id, mapped_unit in self.lists_map.items():
             if mapped_unit == unit:
                 return list_id
+        return None
+
+    def getGroupIdFromUnit(self, unit):
+        """Get group ID from unit number"""
+        for group_id, mapped_unit in self.groups_map.items():
+            if mapped_unit == unit:
+                return group_id
         return None
 
     def updateDevices(self):
@@ -347,6 +482,18 @@ class PiHolePlugin:
                 if list_id in self.lists_map:
                     unit = self.lists_map[list_id]
                     enabled = lst.get('enabled', False)
+                    nValue = 1 if enabled else 0
+                    sValue = "On" if enabled else "Off"
+                    self.updateDevice(unit, nValue, sValue)
+        
+        # Update group devices states
+        groups_data = self.apiGet("/groups")
+        if groups_data and 'groups' in groups_data:
+            for grp in groups_data['groups']:
+                group_id = grp.get('id')
+                if group_id in self.groups_map:
+                    unit = self.groups_map[group_id]
+                    enabled = grp.get('enabled', True)
                     nValue = 1 if enabled else 0
                     sValue = "On" if enabled else "Off"
                     self.updateDevice(unit, nValue, sValue)
@@ -499,6 +646,79 @@ class PiHolePlugin:
             Domoticz.Error(f"Error setting list state: {str(e)}")
             return False
 
+    def setGroupState(self, group_id, enabled):
+        """Enable or disable a group - Pi-hole v6 API"""
+        try:
+            # Get current group data
+            groups_data = self.apiGet("/groups")
+            if not groups_data or 'groups' not in groups_data:
+                Domoticz.Error("Failed to get groups data")
+                return False
+            
+            # Find the group by ID
+            target_group = None
+            for grp in groups_data['groups']:
+                if grp.get('id') == group_id:
+                    target_group = grp
+                    break
+            
+            if not target_group:
+                Domoticz.Error(f"Group ID {group_id} not found")
+                return False
+            
+            # Strip trailing slash from URL if present
+            base_url = Parameters['Address'].rstrip('/')
+            
+            # PUT to /groups/{id}
+            url = f"{base_url}/api/groups/{group_id}"
+            
+            # Send ALL fields from current group to preserve name, description, etc.
+            update_data = {
+                "enabled": enabled,
+                "name": target_group.get('name', ''),
+                "description": target_group.get('description', '')
+            }
+            
+            data = json.dumps(update_data).encode('utf-8')
+            
+            req = urllib.request.Request(url, data=data, method='PUT',
+                                        headers={'Content-Type': 'application/json'})
+            
+            if self.sid:
+                req.add_header('X-FTL-SID', self.sid)
+            
+            response = urllib.request.urlopen(req, timeout=5)
+            result = json.loads(response.read().decode('utf-8'))
+            
+            Domoticz.Debug(f"PUT result: {result}")
+            
+            # Check for errors
+            if 'error' in result:
+                Domoticz.Error(f"API error: {result['error']}")
+                return False
+            
+            # Check processed results
+            if 'processed' in result:
+                errors = result['processed'].get('errors', [])
+                if errors:
+                    Domoticz.Error(f"Error updating group {group_id}: {errors}")
+                    return False
+            
+            Domoticz.Log(f"Successfully set group {group_id} ('{target_group.get('name')}') to {'enabled' if enabled else 'disabled'}")
+            return True
+            
+        except urllib.error.HTTPError as e:
+            try:
+                error_body = e.read().decode('utf-8')
+                error_data = json.loads(error_body)
+                Domoticz.Error(f"HTTP Error {e.code}: {error_data}")
+            except:
+                Domoticz.Error(f"HTTP Error {e.code}: {e.reason}")
+            return False
+        except Exception as e:
+            Domoticz.Error(f"Error setting group state: {str(e)}")
+            return False
+
 global _plugin
 _plugin = PiHolePlugin()
 
@@ -533,3 +753,4 @@ def onDisconnect(Connection):
 def onHeartbeat():
     global _plugin
     _plugin.onHeartbeat()
+
