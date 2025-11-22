@@ -671,14 +671,20 @@ class PiHolePlugin:
             
             # PUT to /groups/{id}
             url = f"{base_url}/api/groups/{group_id}"
-            
-            # Send ALL fields from current group to preserve name, description, etc.
-            update_data = {
-                "enabled": enabled,
-                "name": target_group.get('name', ''),
-                "description": target_group.get('description', '')
-            }
-            
+
+            # Send ALL fields from current group to preserve all metadata
+            # Start with a copy of all fields from the target group
+            update_data = dict(target_group)
+
+            # Remove the 'id' field as it's in the URL
+            if 'id' in update_data:
+                del update_data['id']
+
+            # Override the enabled field with the new value
+            update_data['enabled'] = enabled
+
+            Domoticz.Debug(f"Sending PUT to {url} with data: {update_data}")
+
             data = json.dumps(update_data).encode('utf-8')
             
             req = urllib.request.Request(url, data=data, method='PUT',
