@@ -669,15 +669,16 @@ class PiHolePlugin:
             
             # Strip trailing slash from URL if present
             base_url = Parameters['Address'].rstrip('/')
-            
-            # PUT to /groups/{id}
-            url = f"{base_url}/api/groups/{group_id}"
 
-            # Send only the minimal required fields
+            # Pi-hole API uses group NAME in URL, not ID!
+            group_name = target_group.get('name', '')
+            url = f"{base_url}/api/groups/{group_name}"
+
+            # Send the same fields as Pi-hole UI: name, comment, enabled
             update_data = {
-                "enabled": enabled,
-                "name": target_group.get('name', ''),
-                "description": target_group.get('description') or ''
+                "name": group_name,
+                "comment": target_group.get('comment') or '',
+                "enabled": enabled
             }
 
             Domoticz.Debug(f"Sending PUT to {url} with data: {update_data}")
