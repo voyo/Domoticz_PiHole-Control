@@ -648,6 +648,7 @@ class PiHolePlugin:
 
     def setGroupState(self, group_id, enabled):
         """Enable or disable a group - Pi-hole v6 API"""
+        Domoticz.Log("=== NEW CODE VERSION 2023-11-23 v2 EXECUTING ===")
         try:
             # Get current group data
             groups_data = self.apiGet("/groups")
@@ -672,26 +673,12 @@ class PiHolePlugin:
             # PUT to /groups/{id}
             url = f"{base_url}/api/groups/{group_id}"
 
-            # Build update data with only user-controllable fields
-            # Don't send Pi-hole managed fields like date_added, date_modified, id
+            # Send only the minimal required fields
             update_data = {
                 "enabled": enabled,
                 "name": target_group.get('name', ''),
+                "description": target_group.get('description') or ''
             }
-
-            # Add description if present (handle None and empty values)
-            description = target_group.get('description')
-            if description is not None:
-                update_data['description'] = description
-            else:
-                update_data['description'] = ''
-
-            # Add comment if present (handle None and empty values)
-            comment = target_group.get('comment')
-            if comment is not None:
-                update_data['comment'] = comment
-            else:
-                update_data['comment'] = ''
 
             Domoticz.Debug(f"Sending PUT to {url} with data: {update_data}")
 
