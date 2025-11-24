@@ -671,8 +671,10 @@ class PiHolePlugin:
             base_url = Parameters['Address'].rstrip('/')
 
             # Pi-hole API uses group NAME in URL, not ID!
+            # URL encode the name to handle spaces and special characters
             group_name = target_group.get('name', '')
-            url = f"{base_url}/api/groups/{group_name}"
+            encoded_group_name = urllib.parse.quote(group_name, safe='')
+            url = f"{base_url}/api/groups/{encoded_group_name}"
 
             # Send the same fields as Pi-hole UI: name, comment, enabled
             update_data = {
